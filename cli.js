@@ -9,33 +9,58 @@ import ora from 'ora'
 
 // 限制并发数为 5
 const limit = pLimit(500)
-// 获取页面中的所有链接
-const getUrls = async (url) => {
-  try {
-    const browser = await puppeteer.launch()
-    const page = await browser.newPage()
-    await page.goto(url, { waitUntil: 'domcontentloaded' })
-    // 获取整个页面内容
-    const content = await page.content()
-    const srcs = [...content.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*>/g)].map((item) => {
-      if (/^https?:\/\//.test(item[1])) {
-        return item[1]
-      } else {
-        const urlObj = new URL(item[1], url)
-        return urlObj.toString()
-      }
+// 获取图片url
+const getImgUrl = async (url, content) => {
+  const srcs = [...content.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*>/g)].map((item) => {
+    if (/^https?:\/\//.test(item[1])) {
+      return item[1]
+    } else {
+      const urlObj = new URL(item[1], url)
+      return urlObj.toString()
+    }
+  })
+  const urls = content
+    .match(/"(https:.+?)"/g)
+    .map((item) => item.replace(/"/g, ''))
+    .filter((item) => {
+      const ext = path.extname(item.replace(/\?.+|\/\#.+/g, '')).toLowerCase()
+      if (ext === '') return true
+      return ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)
     })
-    const urls = content
-      .match(/"(https:.+?)"/g)
-      .map((item) => item.replace(/"/g, ''))
-      .filter((item) => {
-        const ext = path.extname(item.replace(/\?.+|\/\#.+/g, '')).toLowerCase()
-        if (ext === '') return true
-        return ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)
+  const uniqueUrls = [...new Set([...srcs, ...urls])]
+
+  return uniqueUrls
+}
+// 获取页面内容
+const getPage = async (url, headless = true) => {
+  try {
+    const browser = await puppeteer.launch({ headless })
+    const page = await browser.newPage()
+    let content = ''
+    if (headless) {
+      // 设置浏览器伪装
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ...')
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => false })
       })
-    const uniqueUrls = [...new Set([...srcs, ...urls])]
+      await page.goto(url, { waitUntil: 'domcontentloaded' })
+      // 获取整个页面内容
+      content = await page.content()
+    } else {
+      await page.goto(url, { waitUntil: 'domcontentloaded' })
+      // 启动实时缓存
+      await new Promise((resolve) => {
+        let timer = setInterval(() => {
+          content = page.evaluate(() => document.documentElement.outerHTML)
+        }, 1000)
+        page.on('close', () => {
+          resolve()
+          clearInterval(timer)
+        })
+      })
+    }
     await browser.close()
-    return uniqueUrls
+    return content
   } catch (error) {
     console.log(chalk.red('致命错误:', error.message))
     process.exit(1) // 非零退出码表示失败
@@ -43,7 +68,7 @@ const getUrls = async (url) => {
 }
 // 获取用户输入
 const getUserInput = async () => {
-  const { targetUrl, usePath } = await prompts([
+  const { targetUrl, usePath, headless } = await prompts([
     {
       type: 'text',
       name: 'targetUrl',
@@ -62,8 +87,14 @@ const getUserInput = async () => {
         return !illegalChars.test(value) || '路径包含非法字符'
       },
     },
+    {
+      type: 'confirm',
+      name: 'headless',
+      message: '是否使用无头模式(可选，默认使用)',
+      initial: true,
+    },
   ])
-  return { targetUrl, usePath }
+  return { targetUrl, usePath, headless }
 }
 // 初始化目录
 const initDirectory = (usePath) => {
@@ -142,10 +173,14 @@ const downloadImage = (urls, dirPath) => {
 // 主函数
 const createDownload = async () => {
   try {
-    const { targetUrl, usePath } = await getUserInput()
-    const loading = ora('正在获取图片链接...').start()
-    const urls = await getUrls(targetUrl)
+    const { targetUrl, usePath, headless } = await getUserInput()
+    const loading = ora('正在获取页面内容...').start()
+    const content = await getPage(targetUrl, headless)
+    loading.succeed('获取页面内容成功')
+    loading.start('正在获取图片链接...')
+    const urls = await getImgUrl(targetUrl, content)
     loading.succeed(`获取图片链接成功: ${urls.length}`)
+    // loading.succeed(`获取图片链接成功: ${urls.length}`)
     const dirPath = initDirectory(usePath)
     await Promise.all(downloadImage(urls, dirPath))
     console.log(chalk.green('✅下载完成'))
