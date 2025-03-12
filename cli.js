@@ -8,7 +8,7 @@ import pLimit from 'p-limit'
 import ora from 'ora'
 
 // 限制并发数为 5
-const limit = pLimit(5)
+const limit = pLimit(500)
 // 获取页面中的所有链接
 const getUrls = async (url) => {
   try {
@@ -84,23 +84,27 @@ const downloadWithRetry = async (url, dirPath, maxRetries = 3) => {
 
       const type = response.headers['content-type']
       if (/image/.test(type) && !/svg/.test(url)) {
-        let filename =
-          url
-            .split('/')
-            .pop()
-            .match(/.*\.(?=[^\.]*$)/)[0]
-            .replace(/(\#|\?).*/, '') +
-          (/\?/.test(url) ? `_${/\?(.*)/.exec(url)[1]}` : '') +
-          `.${type.split('/')[1] || 'bin'}`
-        // fs.existsSync(path.join(dirPath, filename))
-        //   ? (filename = `${filename.split('.')[0]}_${Date.now()}.${filename.split('.')[1]}`)
-        //   : ''
-
+        let filename = url.split('/').pop().replace(/\#|\?/, '')
+        const extName = type.split('/')[1]
+        if (filename.includes(extName)) {
+          filename = filename.split(`.${extName}`).join('') + `.${extName}`
+        } else {
+          filename = filename + `.${extName}`
+        }
+        const filePath = path.join(dirPath, filename)
         await new Promise((resolve, reject) => {
-          response.data
-            .pipe(fs.createWriteStream(path.join(dirPath, filename)))
-            .on('finish', resolve)
-            .on('error', reject)
+          const writer = fs.createWriteStream(filePath)
+          response.data.pipe(writer).on('finish', resolve).on('error', reject)
+          // 设置超时
+          let timeoutId
+          response.data.on('data', () => {
+            timeoutId && clearTimeout(timeoutId)
+            timeoutId = setTimeout(() => {
+              writer.destroy()
+              response.data.destroy()
+              reject(new Error('下载超时'))
+            }, 30000)
+          })
         })
         return { success: true, url }
       }
