@@ -6,9 +6,10 @@ import fs from 'fs'
 import path from 'path'
 import pLimit from 'p-limit'
 import ora from 'ora'
+import { fileTypeFromStream } from 'file-type'
 
 // 限制并发数为 5
-const limit = pLimit(500)
+const limit = pLimit(5)
 // 获取图片url
 const getImgUrl = async (url, content) => {
   const srcs = [...content.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*>/g)].map((item) => {
@@ -113,10 +114,11 @@ const downloadWithRetry = async (url, dirPath, maxRetries = 3) => {
       const response = await axios.get(url, { responseType: 'stream', timeout: 10000 })
       if (response.status !== 200) throw new Error(`HTTP ${response.status}`)
 
-      const type = response.headers['content-type']
-      if (/image/.test(type) && !/svg/.test(url)) {
+      const fileType = await fileTypeFromStream(response.data)
+
+      if (fileType && /image/.test(fileType.mime)) {
         let filename = url.split('/').pop().replace(/\#|\?/, '')
-        const extName = type.split('/')[1]
+        const extName = fileType.ext
         if (filename.includes(extName)) {
           filename = filename.split(`.${extName}`).join('') + `.${extName}`
         } else {

@@ -6,7 +6,7 @@
   "scripts": {
     "build": "npx esbuild cli.js --bundle --platform=node --outfile=dist/bundle.js --external:typescript",
     "sea": "node --experimental-sea-config sea-config.json && node -e \"require('fs').copyFileSync(process.execPath, 'dist/image-scraper.exe')\" && npx postject dist/image-scraper.exe NODE_SEA_BLOB dist/image-scraper.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 --overwrite",
-    "pack": "npx esbuild cli.js --bundle --platform=node --outfile=dist/bundle.js --external:typescript && npx postject dist/bundle.js NODE_SEA_BLOB dist/image-scraper.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 --overwrite"
+    "pack": "npx esbuild cli.js --bundle --platform=node --outfile=dist/bundle.js --external:typescript && node --experimental-sea-config sea-config.json && npx postject dist/bundle.js NODE_SEA_BLOB dist/image-scraper.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 --overwrite"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +16,7 @@
     "axios": "^1.8.2",
     "chalk": "^5.4.1",
     "esbuild": "^0.25.1",
+    "file-type": "^20.4.1",
     "ora": "^8.2.0",
     "p-limit": "^6.2.0",
     "prompts": "^2.4.2",
