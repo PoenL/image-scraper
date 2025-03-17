@@ -6,7 +6,7 @@ import fs from 'fs'
 import path from 'path'
 import pLimit from 'p-limit'
 import ora from 'ora'
-import { fileTypeFromStream } from 'file-type'
+import { fileTypeFromBuffer } from 'file-type'
 
 // 限制并发数为 5
 const limit = pLimit(5)
@@ -106,6 +106,42 @@ const initDirectory = (usePath) => {
   }
   return dirPath
 }
+// 获取文件类型
+const getFileTypeFromStream = async (stream) => {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let bytesRead = 0
+    const neededBytes = 4100 // file-type 检测需要的前 4100 字节
+
+    // 数据到达时收集数据
+    const onData = (chunk) => {
+      chunks.push(chunk)
+      bytesRead += chunk.length
+
+      // 当收集到足够字节时
+      if (bytesRead >= neededBytes) {
+        stream.off('data', onData) // 停止监听
+        stream.pause() // 暂停原始流
+
+        // 合并 buffer 并检测类型
+        const buffer = Buffer.concat(chunks)
+        fileTypeFromBuffer(buffer)
+          .then((fileType) => {
+            // 将读取的 buffer 重新推回流中（关键步骤）
+            stream.unshift(buffer)
+            resolve(fileType)
+          })
+          .catch(reject)
+          .finally(() => {
+            stream.resume() // 恢复流流动
+          })
+      }
+    }
+
+    stream.on('data', onData)
+    stream.on('error', reject)
+  })
+}
 // 下载图片（带重试）
 const downloadWithRetry = async (url, dirPath, maxRetries = 3) => {
   let retries = 0
@@ -114,7 +150,7 @@ const downloadWithRetry = async (url, dirPath, maxRetries = 3) => {
       const response = await axios.get(url, { responseType: 'stream', timeout: 10000 })
       if (response.status !== 200) throw new Error(`HTTP ${response.status}`)
 
-      const fileType = await fileTypeFromStream(response.data)
+      const fileType = await getFileTypeFromStream(response.data)
 
       if (fileType && /image/.test(fileType.mime)) {
         let filename = url.split('/').pop().replace(/\#|\?/, '')
