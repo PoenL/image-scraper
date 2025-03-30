@@ -6,7 +6,8 @@ import fs from 'fs'
 import path from 'path'
 import pLimit from 'p-limit'
 import ora from 'ora'
-import { fileTypeFromBuffer } from 'file-type'
+import { fileTypeFromStream } from 'file-type'
+import { PassThrough } from 'stream'
 
 // 限制并发数为 5
 const limit = pLimit(5)
@@ -33,34 +34,67 @@ const getImgUrl = async (url, content) => {
   return uniqueUrls
 }
 // 获取页面内容
-const getPage = async (url, headless = true) => {
+const getPageContent = async (url, headless = true) => {
   try {
     const browser = await puppeteer.launch({ headless })
     const page = await browser.newPage()
+    // 设置浏览器伪装
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ...')
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false })
+    })
     let content = ''
+
     if (headless) {
-      // 设置浏览器伪装
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ...')
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => false })
-      })
       await page.goto(url, { waitUntil: 'domcontentloaded' })
       // 获取整个页面内容
       content = await page.content()
+      await browser.close()
     } else {
-      await page.goto(url, { waitUntil: 'domcontentloaded' })
-      // 启动实时缓存
-      await new Promise((resolve) => {
-        let timer = setInterval(() => {
-          content = page.evaluate(() => document.documentElement.outerHTML)
-        }, 1000)
-        page.on('close', () => {
-          resolve()
-          clearInterval(timer)
+      // 注入反反调试脚本
+      await page.evaluateOnNewDocument(() => {
+        // 1. 禁用 debugger
+        window.debugger = () => {}
+        // 2. 冻结时间检测
+        let fakeTime = 0
+        window.Date = class extends Date {
+          constructor(...args) {
+            super(...args)
+            if (args.length === 0) {
+              fakeTime += 10
+              return new Date(fakeTime)
+            }
+            return new Date(...args)
+          }
+        }
+        // 3. 阻止重载
+        window.location.reload = () => console.log('[Blocked] Reload')
+      })
+      // 非 Headless 模式：使用 Promise 等待事件触发
+      let resolveContent
+      const contentPromise = new Promise((resolve) => {
+        resolveContent = resolve
+      })
+      // 暴露函数用于回传内容
+      await page.exposeFunction('saveContent', (html) => {
+        content = html // 捕获内容
+        console.log(chalk.green('页面内容已捕获'), html)
+
+        resolveContent() // 解析 Promise
+      })
+
+      // 注入监听脚本
+      await page.evaluateOnNewDocument(() => {
+        window.addEventListener('beforeunload', () => {
+          const html = document.documentElement.outerHTML
+          window.saveContent(html)
         })
       })
+
+      await page.goto(url, { waitUntil: 'domcontentloaded' })
+      await contentPromise // 阻塞直到内容捕获
     }
-    await browser.close()
+
     return content
   } catch (error) {
     console.log(chalk.red('致命错误:', error.message))
@@ -106,42 +140,6 @@ const initDirectory = (usePath) => {
   }
   return dirPath
 }
-// 获取文件类型
-const getFileTypeFromStream = async (stream) => {
-  return new Promise((resolve, reject) => {
-    const chunks = []
-    let bytesRead = 0
-    const neededBytes = 4100 // file-type 检测需要的前 4100 字节
-
-    // 数据到达时收集数据
-    const onData = (chunk) => {
-      chunks.push(chunk)
-      bytesRead += chunk.length
-
-      // 当收集到足够字节时
-      if (bytesRead >= neededBytes) {
-        stream.off('data', onData) // 停止监听
-        stream.pause() // 暂停原始流
-
-        // 合并 buffer 并检测类型
-        const buffer = Buffer.concat(chunks)
-        fileTypeFromBuffer(buffer)
-          .then((fileType) => {
-            // 将读取的 buffer 重新推回流中（关键步骤）
-            stream.unshift(buffer)
-            resolve(fileType)
-          })
-          .catch(reject)
-          .finally(() => {
-            stream.resume() // 恢复流流动
-          })
-      }
-    }
-
-    stream.on('data', onData)
-    stream.on('error', reject)
-  })
-}
 // 下载图片（带重试）
 const downloadWithRetry = async (url, dirPath, maxRetries = 3) => {
   let retries = 0
@@ -149,11 +147,19 @@ const downloadWithRetry = async (url, dirPath, maxRetries = 3) => {
     try {
       const response = await axios.get(url, { responseType: 'stream', timeout: 10000 })
       if (response.status !== 200) throw new Error(`HTTP ${response.status}`)
+      const typeStream = new PassThrough()
+      const saveStream = new PassThrough()
+      response.data.pipe(typeStream)
+      response.data.pipe(saveStream)
 
-      const fileType = await getFileTypeFromStream(response.data)
+      const fileType = await fileTypeFromStream(typeStream)
+      typeStream.destroy()
 
       if (fileType && /image/.test(fileType.mime)) {
-        let filename = url.split('/').pop().replace(/\#|\?/, '')
+        let filename = url
+          .split('/')
+          .pop()
+          .replace(/\#|\?|\\/g, '')
         const extName = fileType.ext
         if (filename.includes(extName)) {
           filename = filename.split(`.${extName}`).join('') + `.${extName}`
@@ -163,14 +169,14 @@ const downloadWithRetry = async (url, dirPath, maxRetries = 3) => {
         const filePath = path.join(dirPath, filename)
         await new Promise((resolve, reject) => {
           const writer = fs.createWriteStream(filePath)
-          response.data.pipe(writer).on('finish', resolve).on('error', reject)
+          saveStream.pipe(writer).on('finish', resolve).on('error', reject)
           // 设置超时
           let timeoutId
-          response.data.on('data', () => {
+          saveStream.on('data', () => {
             timeoutId && clearTimeout(timeoutId)
             timeoutId = setTimeout(() => {
               writer.destroy()
-              response.data.destroy()
+              saveStream.destroy()
               reject(new Error('下载超时'))
             }, 30000)
           })
@@ -212,16 +218,19 @@ const downloadImage = (urls, dirPath) => {
 const createDownload = async () => {
   try {
     const { targetUrl, usePath, headless } = await getUserInput()
+
     const loading = ora('正在获取页面内容...').start()
-    const content = await getPage(targetUrl, headless)
+    const content = await getPageContent(targetUrl, headless)
     loading.succeed('获取页面内容成功')
+
     loading.start('正在获取图片链接...')
     const urls = await getImgUrl(targetUrl, content)
     loading.succeed(`获取图片链接成功: ${urls.length}`)
-    // loading.succeed(`获取图片链接成功: ${urls.length}`)
+
     const dirPath = initDirectory(usePath)
     await Promise.all(downloadImage(urls, dirPath))
     console.log(chalk.green('✅下载完成'))
+
     await createDownload()
   } catch (error) {
     console.log(chalk.red('全局捕获错误:', error.message))
