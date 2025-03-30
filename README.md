@@ -99,7 +99,7 @@ node image-downloader.js
 
 ## 许可证
 
-[MIT License](LICENSE) © 2023 Your Name
+[MIT License](LICENSE) © 2025 PoenL
 
 ---
 
